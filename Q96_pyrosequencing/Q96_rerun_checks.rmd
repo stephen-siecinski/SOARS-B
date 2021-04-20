@@ -1,0 +1,181 @@
+---
+title: "Q96 Rerun Sample Management"
+output: html_notebook
+---
+
+```{r echo=FALSE}
+library(dplyr)
+library(vroom)
+library(stringr)
+library(janitor)
+```
+
+```{r}
+inputs <- paste0(getwd(), "/inputs/")
+outputs <- paste0(getwd(), "/outputs/")
+```
+
+# Read-in & Process Files
+```{r}
+
+rerun_find_subs <- rerun_qc_results %>%
+  select(sample_id, genolist_plate) %>%
+  left_join(select(all_allocations,
+                   sample, tube_barcode),
+            by = c("sample_id" = "sample"))
+  
+# Any in the list that are not in the box? 
+rerun_find_subs <- left_join(rerun_find_subs, 
+                          rerun_plates, by = c("tube_barcode" = "code")) %>%
+  arrange(plate, column, row)
+
+# A2005544
+
+write.table(rerun_find_subs,
+            file = paste0(outputs, "20210202_rerun_sample_list.txt"),
+            quote = FALSE, row.names = FALSE, col.names = TRUE, sep = "\t")
+
+```
+
+# Post volume-check quant
+I visually inspected the samples that need to be rerun and were not in plates J or K, consolidated them, and rescanned them. Linking the scan file to nanodrop results. 
+
+```{r}
+inspected_tubes <- read.csv(paste0(inputs, "20210204_Q96_rerun_tubes.txt"),
+                            sep = "\t") %>% clean_names() %>%
+  left_join(select(all_allocations, sample, tube_barcode),
+            by = c("code" = "tube_barcode"))
+
+write.table(select(inspected_tubes, sample), file = paste0(outputs, "20210204_nanodrop_sample_names.txt"), sep = "\t", row.names = FALSE,
+            col.names = TRUE, quote = FALSE)
+
+
+# Importing Q96 nano results
+
+inspected_tubes <- inspected_tubes %>%
+  left_join(select(nano_values, sample_id, conc, x260_280, x260_230),
+            by = c("sample" = "sample_id")) %>%
+  filter(!is.na(sample))
+
+reallocations <- filter(inspected_tubes, conc < 10)
+```
+
+# Alignment of pass/failed samples with genolist
+
+```{r}
+passed_samples <- vroom(paste0(inputs, "20210202_Q96_QC_filtered_samples.txt")) %>%
+  filter(!sample_id %in% c("0%_MC", "50%_MC", "100%_MC", "NTC", "blank")) %>%
+  mutate(status = "passed_QC")
+
+failed_samples <- vroom(paste0(inputs, "20210202_Q96_failed_QC_samples.txt")) %>%
+  filter(!sample_id %in% c("0%_MC", "50%_MC", "100%_MC", "NTC", "blank")) %>%
+  mutate(status = "failed_QC")
+
+all_run_samples <- bind_rows(passed_samples, failed_samples)
+all_allocations <- vroom(paste0(inputs, "allDNAalloc.26Jan2021.txt")) %>% clean_names()
+
+genolist <- vroom(paste0(inputs, "genolist.txt")) %>% clean_names() %>%
+  rename("genolist_plate" = "plate_96")
+
+genolist_sub_QC_blank <- genolist %>%
+  filter(sample != "blank" & !str_detect(sample, ".*QC.*"))
+
+genolist_results <- left_join(genolist_sub_QC_blank,
+                              all_run_samples,
+                              by = c("sample" = "sample_id"))
+
+# These are the samples I need to convert
+rerun_samples <- filter(genolist_results, status == "failed_QC")
+rerun_BSC <- filter(rerun_samples, !genolist_plate %in% c("J", "K")) %>%
+  select(sample)
+
+# Find where they are stored
+
+nrow(filter(nano_values, sample_id %in% rerun_BSC$sample))
+# All 72 samples in the nanodropped rerun plate are in the post-QC rerun list
+# (as expected)
+
+rerun_BSC_find <- filter(rerun_BSC, !sample %in% nano_values$sample_id)
+# 19 samples left to track down 
+
+# load in all of the stored samples and the genotype plates
+stored_samples <- vroom(paste0(inputs, "20210205_soarsb_stored_samples.txt"))
+genotype_boxes <- vroom(paste0(inputs, "final_gt_plate_scans_20210129.txt")) %>%
+  rename_with(~ gsub("gt_", "", .x), starts_with("gt_")) %>%
+  select(colnames(stored_samples))
+rerun_box_2 <- read.csv(paste0(inputs, "20210204_Q96_rerun_tubes_2.txt"),
+                        sep = "\t") %>% clean_names() %>%
+  mutate(well = paste0(row, column)) %>%
+  select(code, well) %>%
+  left_join(select(all_allocations, sample, tube_barcode), by = c("code" = "tube_barcode"))
+
+stored_samples <- rbind(stored_samples, genotype_boxes)
+
+
+# Find the remaining samples, none in storage boxes so the rest bust be in rerun plate 2
+rerun_BSC_find <- rerun_BSC_find %>%
+  left_join(rerun_box_2, by = "sample") %>%
+  mutate(box = "rerun_2")
+
+write.table(rerun_BSC_find, file = paste0(outputs, "20210204_rerun19_nano.txt"),
+            sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+```
+
+
+```{r}
+# nanodrop
+nano_values <- read.csv(paste0(inputs, "20210204_q96_rerun_nano.txt"),
+                        sep = "\t") %>% clean_names() %>%
+  select(sample_id, well, conc) %>%
+  left_join(rerun_BSC, keep = TRUE, by = c("sample_id" = "sample"))
+
+nano_values_2 <- read.csv(paste0(inputs, "20210204_q96_rerun_nano_2.txt"),
+                        sep = "\t") %>% clean_names() %>%
+  select(sample_id, well, conc) %>%
+  left_join(rerun_BSC, keep = TRUE, by = c("sample_id" = "sample"))
+
+# There were some duplicate tubes in the nano file because I wasn't sure which tube would be viable. Identify those, remove the low conc alternative
+
+nano_values %>% group_by(sample_id) %>% filter(n() > 1)
+# H2-A2001830 kept
+# F3-A2001182 kept
+# F5-A2001160 kept
+# F9-A2003289 kept
+
+nano_values_updated <- filter(nano_values, !well %in% c("B3", "E3", "G5", "G9"))
+nano_values_updated <- bind_rows(nano_values_updated, nano_values_2) %>%
+  select(sample, well, conc)
+
+failed_samples_nano <- failed_samples %>%
+  left_join(nano_values_updated, by = c("sample_id" = "sample"))
+
+filter(rerun_samples, !sample %in% nano_values_updated$sample)
+
+# All bases covered. Of the samples that failed QC in the gennolist results file, all are represented on the current rerun plate and the bisulfite converted DNA from batches J and K. 
+
+# Now I just need to request allocations for any sample with insufficient quantity
+write.table(filter(nano_values_updated, conc < 20), 
+            file = paste0(outputs,"20210205_reallocation_check.txt"),
+            sep = "\t", row.names = FALSE, col.names = TRUE,
+            quote = FALSE)
+filter(nano_values_updated, conc < 20)
+```
+
+Visually inspecting those flagged samples
+
+sample	well	conc  keep
+A2000648	A2	2.84  no
+A2002485	C2	15.47 yes
+A2000653	E2	-8.035  no
+A2003806	C3	7.731 yes
+A2003842	H3	13.87 yes
+A2000557	F4	10.76 yes
+A2000645	G4	12.15 yes
+A2001160	F5	4.351 no
+A2000570	B6	12.12 yes
+A2003035	E7	-0.8811 yes (super high vol)
+A2003048	F7	-0.6495 yes (super high vol)
+A2001098	A8	15.95 yes
+A2001106	E8	16.8  yes
+
+Emailing steph to request reallocations where necessary
