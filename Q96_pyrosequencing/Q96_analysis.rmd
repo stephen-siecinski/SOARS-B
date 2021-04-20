@@ -1,0 +1,436 @@
+---
+title: "Q96 analysis 2.0"
+output: html_notebook
+---
+
+# Packages and directories
+```{r eval=FALSE}
+library(dplyr)
+library(tidyr)
+library(lattice)
+library(janitor)
+library(vroom)
+library(ggplot2)
+library(viridis)
+library(ggpubr)
+library(tidyverse)
+
+inputs <- paste0(getwd(), "/inputs/")
+outputs <- paste0(getwd(), "/outputs/")
+```
+
+# Import and clean
+
+```{r}
+soars_b_pheno <- vroom(paste0(inputs, "sb_pheno_data_20210123.txt")) %>% clean_names()
+oxtr_meth <- vroom(paste0(inputs,"20210202_Q96_QC_filtered_samples.txt")) %>% 
+  clean_names() %>%
+  dplyr::select(sample_id, mean_901, mean_924, mean_934, batch) %>%
+  rowwise() %>%
+  mutate(avg_meth_total = mean(c(mean_901, mean_924, mean_934), na.rm = TRUE))
+
+# Combine OXTR methylation data with the paricipant demographics / sample / plasmsa OT table
+analysis_df_base <- left_join(oxtr_meth, soars_b_pheno, by = c("sample_id" = "acquisition_id")) %>%
+  filter(!is.na(subject)) %>%
+  filter(sample_id != "A2000527")
+
+analysis_df_base$funstrat <- as.factor(analysis_df_base$funstrat)
+
+# Need to convert timepoints into a standardized format like Steph used 
+
+table(analysis_df_base$study_timepoint)
+
+# Doing this using recode
+analysis_df_base <- analysis_df_base %>%
+  mutate(study_timepoint = recode(study_timepoint,
+                                  "Baseline" = "baseline",
+                                  "-1" = "baseline",
+                                  "0" = "baseline",
+                                  "24" = "week_24",
+                                  "36" = "week_36",
+                                  "8" = "week_8",
+                                  "8/ET" = "week_8",
+                                  "Baseline_Week 0" = "baseline",
+                                  "SCR" = "screen",
+                                  "Screen" = "screen",
+                                  "Scrn" = "screen",
+                                  "scr" = "screen",
+                                  "W24" = "week_24",
+                                  "W36" = "week_36",
+                                  "W8" = "week_8",
+                                  "32" = "week_36",
+                                  "40" = "week_36",
+                                  "WK 36" = "week_36",
+                                  "Week 24" = "week_24",
+                                  "Week 36" = "week_36",
+                                  "Week 8" = "week_8",
+                                  "Wk 24" = "week_24",
+                                  "Wk 36" = "week_36",
+                                  "Wk 40" = "week_40",
+                                  "Wk 48" = "week_48",
+                                  "Wk 8" = "week_8"))
+table(analysis_df_base$study_timepoint)
+
+
+# Designate factors where appropriate
+colnames(analysis_df_base) 
+
+analysis_df_base <- analysis_df_base %>%
+  mutate_at(vars(subject, randoid, agestrat, funstrat, male, hispanic, race_d, 
+                 site_r, tx, race_d3, assay_batch, assay_batch_plate, oxt_batch_num), 
+            list(factor)) %>%
+  rename("ot_batch" = "oxt_batch_num")
+
+# If a sample has both a baseline and a screen sample, select baseline
+df_baseline <- filter(analysis_df_base, study_timepoint == "baseline" | study_timepoint == "screen")
+df_baseline_dups <- df_baseline %>% 
+  group_by(subject) %>% 
+  filter(n() > 1)
+
+df_baseline <- df_baseline %>%
+  filter(!sample_id %in% df_baseline_dups$sample_id)
+
+df_baseline <- bind_rows(df_baseline, filter(df_baseline_dups, study_timepoint == "baseline"))
+
+# For use in the longitudinal plots
+df_long <- analysis_df_base %>%
+  pivot_longer(cols = starts_with("mean"), names_to = "cpg_site")
+
+
+```
+
+# Subsetting to baseline and looking at associations with plasma oxytocin and other demographics data
+```{r}
+#### Average methylation values across all baseline samples and batches
+
+my_theme <- theme_bw() +
+  theme(axis.text.x = element_text(hjust = 0.5, size = 14, angle = 0, face = "bold"),
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 12, face = "bold"),
+        axis.text.y = element_text(size = 14, face = "bold"),
+        axis.title = element_text(size = 14, face = "bold"),
+        strip.text.x = element_text(size = 14, face = "bold"),
+        strip.text.y = element_text(size = 14, face = "bold"),
+        strip.background = element_blank())
+
+
+
+batch_meth <- ggplot(data = oxtr_meth, aes(x = batch, y = avg_meth_total)) +
+  geom_boxplot(width = 0.5, size = 0.8) + 
+  geom_point() +
+  my_theme +
+  ggtitle("Average Methylation Across -901, -924, -934") +
+  ylim(25,75) + ylab("% Methylation") + xlab("Q96 batch")
+batch_meth
+
+ggsave(filename = paste0(outputs, "pyrosequencing_batch_average_meth_20210223.png"),
+       plot = batch_meth, dpi = 200, width = 10, height = 8, units = "in")
+```
+
+
+# Spaghettii plot of avg meth over time for subject
+```{r}
+
+analysis_df_base$study_timepoint <- factor(analysis_df_base$study_timepoint, 
+                                           levels = c("screen", "baseline", "week_8",
+                                                      "week_24", "week_36", "week_40", 
+                                                      "week_48"))
+analysis_df_base$funstrat <- as.factor(analysis_df_base$funstrat)
+spaghetti_avg <- analysis_df_base %>%
+  filter(study_timepoint != "week_40" & study_timepoint != "week_48") %>%
+  group_by(funstrat, study_timepoint) %>%
+  summarise(avg_meth_total = mean(avg_meth_total))
+
+spaghetti_meth <- ggplot(data = filter(analysis_df_base, study_timepoint != "week_40" &
+                                         study_timepoint != "week_48"), 
+                         aes(x = study_timepoint, y = avg_meth_total, group = subject, color = funstrat)) +
+  my_theme +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(), 
+        title = ggtext::element_markdown(),
+        legend.text=element_text(size = 18)) +
+  ggtitle("Change in Average OXTR Methylation Over Time") +
+  ylab("% Methylation") + 
+  xlab("") +
+  ylim(25,70) +
+  scale_x_discrete(labels=c("screen", "baseline", "week-8", "week-24", "week-36")) +
+  geom_line(size = 1, alpha = 0.1) +
+  geom_line(data = spaghetti_avg, 
+            aes(x = study_timepoint, y = avg_meth_total, group = funstrat, color = funstrat),
+            size = 3, alpha = 0.8) + 
+  scale_color_viridis(discrete = TRUE, option = "D", begin = .1, end = .8, labels = c("Minimally Verbal", "Verbal"))
+  #scale_fill_viridis(discrete = TRUE, option = "A", begin = 0.3, end = 0.8, labels = c("Minimally Verbal", "Verbal")) 
+
+
+ggsave(filename = paste0(outputs, "methylation_over_time_avg_202102224.png"),
+       plot = spaghetti_meth, dpi = 200, width = 12, height = 6, units = "in")
+```
+
+# Linear Models
+```{r}
+ggplotRegression <- function (fit, xlab, ylab, title) {
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  my_theme + 
+  geom_point() +
+  geom_abline(slope = coef(fit)[[2]], intercept = coef(fit)[[1]], col = "blue") +
+  geom_smooth(method = "lm", col = "red") +
+  ylim(c(0, 100)) +
+  labs(title = title,
+       subtitle = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                        "Intercept =",signif(fit$coef[[1]],5 ),
+                        " Slope =",signif(fit$coef[[2]], 5),
+                        " P =",signif(summary(fit)$coef[2,4], 5))) +
+  xlab(xlab) +
+  ylab(ylab)
+}
+
+ggplotRegression_box <- function (fit, xlab, ylab, title) {
+
+ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+  my_theme + 
+  geom_boxplot(alpha = 0.5) +
+  geom_point() +
+  stat_smooth(method = "lm", col = "red") +
+  labs(title = title,
+       subtitle = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                        "Intercept =",signif(fit$coef[[1]],5 ),
+                        " Slope =",signif(fit$coef[[2]], 5),
+                        " P =",signif(summary(fit)$coef[2,4], 5))) +
+  xlab(xlab) +
+  ylab(ylab)
+}
+```
+
+# Inspecting the variables
+```{r}
+library(leaps)
+library(relaimpo)
+
+# Leaps
+leaps <- regsubsets(avg_meth_total ~ log_ot_num + batch + male + study_site + 
+            funstrat + ageyrs + pc1 + pc2 + pc3 + ot_batch, 
+            data = df_baseline, nbest=10)
+
+# view results
+summary(leaps)
+
+# plot a table of models showing variables in each model.
+# models are ordered by the selection statistic.
+
+png(filename = paste0(outputs, "OXTR_avg_meth_factor_analysis_20210303.png"), 
+    width = 10, height = 6, units = "in", res = 100)
+plot(leaps,scale="r2", )
+dev.off()
+
+# plot statistic by subset size
+
+subsets(leaps, statistic="rsq")
+
+# Relative imporatance
+library(relaimpo)
+calc.relimp(fit, type=c("lmg", "last", "first"),
+   rela=TRUE)
+
+# Bootstrap Measures of Relative Importance (1000 samples)
+boot <- boot.relimp(fit, b = 1000, type = c("lmg"), rank = TRUE,
+  diff = TRUE, rela = TRUE)
+booteval.relimp(boot) # print result
+plot(booteval.relimp(boot,sort=TRUE)) # plot result 
+
+```
+
+#### Overall methylation
+```{r}
+fit <- lm(avg_meth_total ~ log_ot_num + batch + male + study_site + 
+            funstrat + ageyrs + pc1 + pc2 + pc3 + ot_batch, 
+          data = df_baseline)
+summary(fit)
+
+lm_overall_meth <- ggplotRegression(fit = fit, title = "Average OXTR methylation & Plasma Oxytocin",
+                                    xlab = "LN Plasma Oxytocin",
+                                    ylab = "% Methylation")
+
+```
+# Individual CpG Meth & pOT
+
+#### -901 methylation
+```{r}
+
+fit <- lm(mean_901 ~ log_ot_num + batch + male + study_site + 
+            funstrat + ageyrs + pc1 + pc2 + pc3 + ot_batch, data = df_baseline)
+summary(fit)
+lm_901_meth <- ggplotRegression(fit = fit, title = "Average OXTR -901 methylation & Plasma Oxytocin",
+                                    xlab = "LN Plasma Oxytocin",
+                                    ylab = "% Methylation")
+```
+
+#### -924 methylation
+```{r}
+
+fit <- lm(mean_924 ~ log_ot_num + batch + male + study_site + 
+            funstrat + ageyrs + pc1 + pc2 + pc3 + ot_batch, 
+          data = df_baseline)
+summary(fit)
+lm_924_meth <- ggplotRegression(fit = fit, title = "Average OXTR -924 methylation & Plasma Oxytocin",
+                                    xlab = "LN Plasma Oxytocin",
+                                    ylab = "% Methylation")
+
+```
+
+#### -934 methylation
+```{r}
+
+fit <- lm(mean_934 ~ log_ot_num + funstrat + batch + male + ageyrs + pc1 + pc2 + pc3 + ot_batch, data = df_baseline)
+
+lm_934_meth <- ggplotRegression(fit = fit, title = "Average OXTR -934 methylation & Plasma Oxytocin",
+                                    xlab = "LN Plasma Oxytocin",
+                                    ylab = "% Methylation")
+```
+
+#### LM Multiplot
+```{r}
+library(cowplot)
+
+lm_grid_meth_ot <- plot_grid(lm_overall_meth + theme(axis.title.x = element_blank()),
+                     lm_901_meth + theme(axis.title.x = element_blank(), 
+                                         axis.title.y = element_blank()),
+                     lm_924_meth,
+                     lm_934_meth + theme(axis.title.y = element_blank()),
+                     ncol = 2,
+                     nrow = 2, align = "hv", labels = c("A","B","C","D"))
+
+ggsave(filename = paste0(outputs, "meth_linear_models_plasma_ot_202102224.png"),
+       plot = lm_grid_meth_ot, dpi = 100, width = 12, height = 12, units = "in")
+```
+
+
+# Is there an association between methylation in OXTR and functional strata?
+
+
+#### Overall methylation
+```{r}
+fit <- lm(avg_meth_total ~ funstrat + log_ot_num + batch + male + ageyrs + pc1 + pc2 + pc3 + oxt_batch, 
+          data = df_baseline)
+lm_overall_meth_fs <- ggplotRegression_box(fit = fit, title = "Average OXTR methylation & Functional Strata",
+                                    xlab = "Functional Strata",
+                                    ylab = "% Methylation")
+lm_overall_meth_fs <- lm_overall_meth_fs + scale_x_discrete(labels=c("Non-verbal", "Verbal"))
+```
+# Individual CpG Meth & pOT
+
+#### -901 methylation
+```{r}
+
+fit <- lm(mean_901 ~ funstrat + log_ot_num + batch + male + ageyrs + pc1 + pc2 + pc3 + oxt_batch, 
+          data = df_baseline)
+
+lm_901_meth_fs <- ggplotRegression_box(fit = fit, title = "Average OXTR -901 methylation & Functional Strata",
+                                    xlab = "Functional Strata",
+                                    ylab = "% Methylation")
+
+lm_901_meth_fs <- lm_901_meth_fs + scale_x_discrete(labels=c("Non-verbal", "Verbal"))
+```
+
+#### -924 methylation
+```{r}
+
+fit <- lm(mean_924 ~ funstrat + log_ot_num + batch + male + ageyrs + pc1 + pc2 + pc3 + oxt_batch, data = df_baseline)
+
+lm_924_meth_fs <- ggplotRegression_box(fit = fit, title = "Average OXTR -924 methylation & Functional Strata",
+                                    xlab = "Functional Strata",
+                                    ylab = "% Methylation")
+lm_924_meth_fs <- lm_924_meth_fs + scale_x_discrete(labels=c("Non-verbal", "Verbal"))
+```
+
+#### -934 methylation
+```{r}
+
+fit <- lm(mean_934 ~ funstrat + log_ot_num + batch + male + ageyrs + pc1 + pc2 + pc3 + oxt_batch, data = df_baseline)
+
+lm_934_meth_fs <- ggplotRegression_box(fit = fit, title = "Average OXTR -934 methylation & Functional Strata",
+                                    xlab = "Functional Strata",
+                                    ylab = "% Methylation")
+lm_934_meth_fs <- lm_934_meth_fs + scale_x_discrete(labels=c("Non-verbal", "Verbal"))
+```
+
+#### LM_funstrat Multiplot
+```{r}
+lm_grid_meth_fs <- plot_grid(lm_overall_meth_fs + theme(axis.title.x = element_blank()),
+                     lm_901_meth_fs + theme(axis.title.x = element_blank(), 
+                                         axis.title.y = element_blank()),
+                     lm_924_meth_fs,
+                     lm_934_meth_fs + theme(axis.title.y = element_blank()),
+                     ncol = 2,
+                     nrow = 2, align = "hv", labels = c("A","B","C","D"))
+
+ggsave(filename = paste0(outputs, "meth_linear_models_functional_strata_202102224.png"),
+       plot = lm_grid_meth_fs, dpi = 200, width = 12, height = 12, units = "in")
+
+```
+
+```{r}
+plot <- ggplot(df_baseline, aes(x = funstrat, 
+                                       y = log_ot_num,
+                                       na.rm = TRUE)) + 
+  geom_boxplot(lwd = 1.5, outlier.shape = NA, aes(color = funstrat)) +
+  geom_point(shape = 21, size = 4, stroke = 2, aes(color = funstrat)) +
+  scale_color_viridis(discrete = TRUE, begin = 0.2, end = 0.8, option = "D") +
+  # geom_signif(comparisons = list(c("high_functioning", "low_functioning")),
+  #             map_signif_level = TRUE) +
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5, size = 30), legend.title = element_blank(),
+        axis.text = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(hjust = 0.5, size = 24),
+        legend.text = element_text(size = 15, face = "bold"),
+        axis.line = element_line(colour = 'black', size = 1.2),
+        axis.ticks = element_line(colour = "black", size = 1.2)) +
+  labs(y = "Plasma OT (log)", x = "")
+ 
+
+plot
+
+ggsave("ot_funstrat.png", plot = plot, path = outputs, device = "png", 
+        dpi = 300, width = 10, height = 8, units = "in")
+```
+
+# Interaction terms
+```{r}
+
+plot(avg_924 ~ log_ot_num, combined_tables_filtered, pch=19)
+fit <- lm(avg_924 ~ log_ot_num:male:funstrat + ageyrs + batch + pc1 + pc2 + pc3 + oxt_batch, data = combined_tables_filtered)
+abline(fit)
+summary(fit)
+plot(fit)
+
+```
+
+# Plotting the methylation controls
+
+```{r}
+control_subset <- filter(oxtr_meth, sample_id == "0%_MC" | sample_id == "50%_MC" | sample_id == "100%_MC")
+
+plot <- ggplot(control_subset, aes(x = sample_id, y = avg_meth_total, na.rm = TRUE)) + 
+  geom_boxplot(lwd = 1.5, outlier.shape = NA, aes(color = sample_id)) +
+  geom_point(shape = 21, size = 4, stroke = 2, aes(color = sample_id)) +
+  scale_color_viridis(discrete = TRUE, begin = 0.2, end = 0.8, option = "D") +
+  # geom_signif(comparisons = list(c("high_functioning", "low_functioning")),
+  #             map_signif_level = TRUE) +
+  theme_classic() + 
+  theme(plot.title = element_text(hjust = 0.5, size = 30), legend.title = element_blank(),
+        axis.text = element_text(size = 18, face = "bold"),
+        axis.title.y = element_text(hjust = 0.5, size = 24),
+        legend.text = element_text(size = 15, face = "bold"),
+        axis.line = element_line(colour = 'black', size = 1.2),
+        axis.ticks = element_line(colour = "black", size = 1.2)) +
+  labs(y = "Plasma OT (log)", x = "")
+ 
+
+plot
+
+ggsave("ot_funstrat.png", plot = plot, path = outputs, device = "png", 
+        dpi = 300, width = 10, height = 8, units = "in")
+```
+
+
+
