@@ -7,6 +7,8 @@ This project can be divided into three primary branches, which are reflected in 
 * DNA methylation analyses (Targeted pyrosequencing, genome-wide 850K EPIC arrays)
 * Genotype analyses (Omni 2.5 GWAS arrays, Taqman probes)
 
+Expression and Genotype analyses were performed in collaboration with other members of the Gregory lab and are available upon request. 
+
 ## DNA Methylation Analyses 
 - [Q96 Pyrosequencing](https://github.com/stephen-siecinski/SOARS-B/tree/main/Q96_pyrosequencing)
 
