@@ -8,5 +8,5 @@ This project can be divided into three primary branches, which are reflected in 
 * Genotype analyses (Omni 2.5 GWAS arrays, Taqman probes)
 
 ## DNA Methylation Analyses 
+- [Q96 Pyrosequencing](https://github.com/stephen-siecinski/SOARS-B/tree/main/Q96_pyrosequencing)
 
-## Genotype Analysis
