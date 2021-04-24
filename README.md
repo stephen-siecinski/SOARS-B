@@ -7,10 +7,6 @@ This project can be divided into three primary branches, which are reflected in 
 * DNA methylation analyses (Targeted pyrosequencing, genome-wide 850K EPIC arrays)
 * Genotype analyses (Omni 2.5 GWAS arrays, Taqman probes)
 
-## Gene Expression Analyses
-
 ## DNA Methylation Analyses 
 
 ## Genotype Analysis
-
-## Misc
