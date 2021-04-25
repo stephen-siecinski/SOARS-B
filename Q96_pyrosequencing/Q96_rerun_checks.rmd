@@ -112,7 +112,7 @@ rerun_box_2 <- read.csv(paste0(inputs, "20210204_Q96_rerun_tubes_2.txt"),
 stored_samples <- rbind(stored_samples, genotype_boxes)
 
 
-# Find the remaining samples, none in storage boxes so the rest bust be in rerun plate 2
+# Find the remaining samples, none in storage boxes so the rest must be in rerun plate 2
 rerun_BSC_find <- rerun_BSC_find %>%
   left_join(rerun_box_2, by = "sample") %>%
   mutate(box = "rerun_2")
