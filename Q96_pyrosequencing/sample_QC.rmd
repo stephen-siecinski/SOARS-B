@@ -3,7 +3,7 @@ title: "Q96 QC 2.0"
 output: html_notebook
 ---
 
-## Loading libraries and setting up directories 
+# Loading libraries and setting up directories 
 
 ```{r message=FALSE, warning=FALSE}
 library(dplyr)
@@ -18,23 +18,27 @@ library(viridis)
 library(purrr)
 library(stringr)
 
-# Set up directories 
+
+# Set up the relevant directories 
 inputs <- paste0(getwd(), "/inputs/")
 outputs <- paste0(getwd(), "/outputs/")
 output_plots <- paste0(outputs, "plots/")
 ```
 
-## Read in and consolidate run files 
+# Read in and consolidate all of the run files 
+
+This chunk was used to look for name conflicts or issues with the sample from the run files not matching the samples from the batches. Some of the approaches were incorporated into the QC pipeline that follows it. 
 
 ```{r}
 
 # Pointing to the directory containing the machine files
 input_files <- list.files(paste0(inputs,"run_files/"))
 
-# Import and clean colnames of each file
+# Function to run vroom and clean_name on each file
 read_in <- function(path){
   vroom(path) %>% clean_names()}
 
+# Initialize empty list that will be populated by each Q96 plate
 machine_results_list <- list()
 
 for (i in input_files){
@@ -43,56 +47,64 @@ for (i in input_files){
   machine_results_list[[i]] <- temp_reads
 }
 
+# Checking the structure of the resulting dfs within the list
+colnames(machine_results_list[[1]])
+
+# Bind together each element of the list into a single df
 methyl_table <- bind_rows(machine_results_list)
 colnames(methyl_table)
 
+# Renaming and selecting the raw methylation values that will be used as inputs for the QC pipeline
+# Some sloppy labeling, using an _ or not in the methylated controls, standardizing
 
 methyl_table_cleaned <- methyl_table %>%
   rename(meth_901 = pos_1_methylation_percent,
          meth_924 = pos_2_methylation_percent,
-         meth_934 = pos_3_methylation_percent) %>%
+         meth_934 = pos_3_methylation_percent
+         ) %>%
+  mutate(sample_id = recode(sample_id, "100% MC" = "100%_MC",
+                           "50% MC" = "50%_MC",
+                           "0% MC" = "0%_MC")
+         ) %>%
   select(sample_id, plate, well, 
          meth_901, meth_924, meth_934) %>%
   mutate(plate = str_replace(plate, ".txt", ""))
 
+# Checking subset
 colnames(methyl_table_cleaned)
 
-# Checking for sample name mismatches before proceeding
+tech_samples <- c("100%_MC", "50%_MC", "0%_MC", "NTC", "BLANK")
+
+# Checking for sample name mismatches before proceeding 
 genolist <- vroom(paste0(inputs, "genolist.txt")) %>% clean_names()
 name_checks <- filter(filter(methyl_table_cleaned, 
                              !sample_id %in% 
-                               c("100%_MC", "NTC", "0%_MC", "50%_MC", 
-                                 "100%_MC", "0% MC", "50% MC", "100% MC", 
-                                 "BLANK")), 
+                               tech_samples), 
                       !sample_id %in% genolist$sample)
-name_checks
 
+dim(name_checks) # 0, No conflicts
 
-methyl_table_cleaned <- methyl_table_cleaned %>%
-  mutate(sample_id = recode_factor(sample_id,
-                                   "100% MC" = "100%_MC",
-                                   "50% MC" = "50%_MC",
-                                   "0% MC" = "0%_MC"))
-
+# Make sure every sample in the cleaned DF is in the genolist
 nrow(filter(filter(methyl_table_cleaned, 
-                             !sample_id %in% c("100%_MC", "NTC", "0%_MC", 
-                                               "50%_MC", "100%_MC", "BLANK")), 
+                             !sample_id %in% c("100%_MC", "50%_MC", "0%_MC", 
+                                                "BLANK", "NTC")), 
                       !sample_id %in% genolist$sample))
 
 # 0, all good
 ```
 
-## QC filtering 
+# QC filtering 
 
-The consolidated plate looks good. Now to generate the summary stats and push them into a new table that consolidates all three text files for each batch into one batch report per sample
+The consolidated plate looks good. Now to generate the summary stats and push them into a new table that consolidates all three text files for each batch into one report
+
+
+## Functions
+Two functions that will be called in the for loop that I used to process the raw data and generate summary statistics / flags and subsequently filter the samples into pass/fail dataframes. 
+
 
 ```{r}
 
-# QC across all batches
-
-batches <- LETTERS[seq(from = 1, to = 11)]
-post_qc_list <- list()
-
+# This will be used to import each run file, clean it up, standardize methylated control sample IDs
 import_runfile <- function(file){
     vroom(file) %>% 
     clean_names() %>%
@@ -105,7 +117,12 @@ import_runfile <- function(file){
                                    "100% MC" = "100%_MC",
                                    "50% MC" = "50%_MC",
                                    "0% MC" = "0%_MC"))
-}
+}  
+  
+# This function will be used to correct the mean values for the SD-flagged samples
+# For each sample in each batch, extract the three methylation values and determine their distances from one another
+# Since the sample was flagged for an SD > 5 at that position, one sample will necessarily be > 5% divergent from another
+# Identify the two that are < 5% and calculate their mean, assign that as the new mean value for the sample
 
 sd_correction <- function(samp, column_df){
   values <- filter(run_file, sample_id == samp)
@@ -120,37 +137,49 @@ sd_correction <- function(samp, column_df){
                   ifelse(dif_2_3 < 5 & !is.na(dif_2_3), 
                          mean(as.numeric(values[2,]), as.numeric(values[3,])),
                                 NA)))
+  
   return(updated_mean)
 }
 
+
 ```
 
-## Running the QC pipeline
+
+## Generating QC report 
 
 ```{r}
+# Each batch is composed of three plates (A-J, 1-3)
+# Importing each file, then cleaning them up and binding together before generating summary stats and 
+# flagging QC failures
 
+# Initialize empty lists that will be populated with post-QC dfs
 passed_samples <- list()
 failed_samples <- list()
+
+# Initialize the iterator
 z <- 1
+
 batches <- LETTERS[seq(from = 1, to = 11)]
 for(i in batches){
-  # Each batch is composed of three plates (A-J, 1-3)
-  # The output changes between 49 to 50 columns due to quirks of the machine
-  # Importing each file then cleaning them up and binding together before generating summary stats
-  # and flagging QC failures
+  
+  # Read in the three plates for each batch and break into individual dfs
   run_files <- list.files(paste0(inputs, "run_files"), 
                           pattern = paste0(i,".*"), full.names = TRUE)
   df_1 <- import_runfile(run_files[1])
   df_2 <- import_runfile(run_files[2])
   df_3 <- import_runfile(run_files[3])
+  
+  # Combine into one df and summarize
   run_file <- bind_rows(df_1, df_2, df_3)
   run_file_summary <- run_file %>%
     group_by(sample_id) %>%
     summarize(mean_901 = mean(meth_901, na.rm = TRUE), sd_901 = sd(meth_901, na.rm = TRUE),
               mean_924 = mean(meth_924, na.rm = TRUE), sd_924 = sd(meth_924, na.rm = TRUE),
               mean_934 = mean(meth_934, na.rm = TRUE), sd_934 = sd(meth_934, na.rm = TRUE),
+              # NA counts are generated when a measurement fails
               na_count_901 = sum(is.na(meth_901)), na_count_924 = sum(is.na(meth_924)),
               na_count_934 = sum(is.na(meth_934)))
+  # Assign flags for standard deviation > 5 and for any sample with more than one missing value per position
   run_file_summary <- run_file_summary %>%
     mutate(sd_flag_901 = ifelse(sd_901 > 5, "yes", "no")) %>%
     mutate(sd_flag_924 = ifelse(sd_924 > 5, "yes", "no")) %>%
@@ -159,9 +188,10 @@ for(i in batches){
                             na_count_924 > 1 | 
                             na_count_934 >1, 
                             "yes", "no")) %>%
+    # Assign batch to the df so we can keep track
     mutate(batch = as.character(i))
   
-  # filter out any samples that have zero flags, classify as passed QC
+  # filter out any samples that have zero flags, they good
   good_samples <- filter(run_file_summary, 
                          sd_flag_901 == "no" & sd_flag_924 == "no" &
                          sd_flag_934 == "no" & na_flag == "no")
@@ -174,6 +204,7 @@ for(i in batches){
   flagged_samples <- filter(run_file_summary,
                             (sd_flag_901 == "yes" | sd_flag_924 == "yes" |
                             sd_flag_934 == "yes") & na_flag == "no")
+  
   
   # Apply the correction for each position to each sample, NA out the mean if
   # there are no two samples that are within 5% methylation of eachother
@@ -211,15 +242,26 @@ z <- z + 1
 passed_samples_df <- bind_rows(passed_samples)
 failed_samples_df <- bind_rows(failed_samples)
 
-rm(machine_results_list, methyl_table, methyl_table_cleaned, name_checks, post_qc_list, temp_reads, batches, i, input_files, bad_samples, df_1, df_2, df_3, failed_samples,
-   flagged_samples, genolist, good_samples, passed_samples, run_file, run_file_summary)
+rm(run_file, run_file_summary, batches, i, z, bad_samples, df_1, df_2, df_3, failed_samples, flagged_samples, good_samples, passed_samples, run_files, run_file_summary)
+
+# Writing the post-QC pass/fail dataframes 
+# Passed samples will be used in the Q96 analysis 
+# Failed samples will be rerun using the same protocol and subjected to the same QC pipeline
 
 write.table(passed_samples_df, 
-            file = paste0(outputs, "20210202_Q96_QC_filtered_samples.txt"),
+            file = paste0(outputs, "Q96_post-QC_passed_samples_20210202.txt"),
             sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
 
 write.table(failed_samples_df, 
-            file = paste0(outputs, "20210202_Q96_failed_QC_samples.txt"),
+            file = paste0(outputs, "Q96_post-QC_failed_samples_20210202.txt"),
             sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
 ```
 
+## Summarize outputs
+
+```{r}
+dim(filter(passed_samples_df, !sample_id %in%  tech_samples))
+
+dim(filter(failed_samples_df, !sample_id %in% tech_samples))
+
+```
